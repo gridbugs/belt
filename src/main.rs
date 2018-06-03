@@ -514,7 +514,6 @@ fn main() {
 
     let tex_kind =
         gfx::texture::Kind::D2(width as u16, height as u16, gfx::texture::AaMode::Single);
-    let tex_mipmap = gfx::texture::Mipmap::Allocated;
 
     type R = Resources;
     type T = (gfx::format::R8_G8_B8_A8, gfx::format::Srgb);
@@ -552,14 +551,14 @@ fn main() {
         &mut encoder,
     );
 
-    let mut map_renderer = MapRenderer::new(
+    let map_renderer = MapRenderer::new(
         colour_rtv.clone(),
         visibility_rtv.clone(),
         &mut factory,
         &mut encoder,
     );
 
-    let mut lighting_renderer = LightingRenderer::new(
+    let lighting_renderer = LightingRenderer::new(
         colour_srv.clone(),
         visibility_srv,
         rtv.clone(),
@@ -609,9 +608,6 @@ impl ButtonState {
     }
     fn release(&mut self) {
         self.current = false;
-    }
-    fn is_press_transition(&self) -> bool {
-        self.current && !self.previous
     }
 }
 
@@ -781,16 +777,9 @@ impl GameState {
                 physics.facing = aim_vector;
             }
             const THRUST_MULTIPLIER: f32 = 0.2;
-            const VELOCITY_MAX_MAGNITUDE: f32 = 10.;
-            const VELOCITY_MAX_MAGNITUDE2: f32 =
-                VELOCITY_MAX_MAGNITUDE * VELOCITY_MAX_MAGNITUDE;
-            let mut next_velocity = physics.velocity
+            let next_velocity = physics.velocity
                 + physics.facing * input_model.thrust * THRUST_MULTIPLIER;
-            physics.velocity = if next_velocity.magnitude2() > VELOCITY_MAX_MAGNITUDE2 {
-                next_velocity.normalize() * VELOCITY_MAX_MAGNITUDE
-            } else {
-                next_velocity
-            };
+            physics.velocity = next_velocity;
         }
     }
     pub fn eye_position(&self) -> Vector2<f32> {
