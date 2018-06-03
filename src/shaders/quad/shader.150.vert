@@ -26,7 +26,7 @@ void main() {
 
     vec2 screen_coord = vec2(
         pixel_coord.x / u_WindowSizeInPixels.x * 2 - 1,
-        1 - pixel_coord.y / u_WindowSizeInPixels.y * 2);
+        pixel_coord.y / u_WindowSizeInPixels.y * 2 - 1);
 
     v_SpriteSheetSampleCoord =
         (i_SpritePositionOfTopLeftInPixels +

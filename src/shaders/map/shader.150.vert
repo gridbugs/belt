@@ -11,7 +11,7 @@ out vec2 v_TexCoord;
 void main() {
     vec2 screen_coord = vec2(
         a_CornerZeroToOne.x * 2 - 1,
-        1 - a_CornerZeroToOne.y * 2);
+        a_CornerZeroToOne.y * 2 - 1);
 
     v_TexCoord = a_CornerZeroToOne;
 

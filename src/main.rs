@@ -9,6 +9,7 @@ extern crate glutin;
 extern crate image;
 
 use gfx::Device;
+use gfx::Factory;
 use glutin::GlContext;
 
 use cgmath::{InnerSpace, Vector2, vec2};
@@ -23,40 +24,18 @@ const QUAD_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.
 
 const MAX_NUM_QUADS: usize = 1024;
 
-struct RenderTarget<R: gfx::Resources> {
-    rtv: gfx::handle::RenderTargetView<R, ColourFormat>,
-    dsv: gfx::handle::DepthStencilView<R, DepthFormat>,
-    srv: gfx::handle::ShaderResourceView<R, [f32; 4]>,
-    dimensions: Vector2<u16>,
-}
-
-impl<R: gfx::Resources> RenderTarget<R> {
-    pub fn new<F>(dimensions: Vector2<u16>, factory: &mut F) -> Self
-    where
-        F: gfx::Factory<R> + gfx::traits::FactoryExt<R>,
-    {
-        let (_, srv, rtv) = factory
-            .create_render_target(dimensions.x, dimensions.y)
-            .expect("Failed to create render target");
-        let (_, _, dsv) = factory
-            .create_depth_stencil(dimensions.x, dimensions.y)
-            .expect("Failed to create depth stencil");
-        Self {
-            srv,
-            rtv,
-            dsv,
-            dimensions,
-        }
-    }
-}
+gfx_constant_struct!(LightingPropertiesStatic {
+    window_size_in_pixels: [f32; 2] = "u_WindowSizeInPixels",
+});
 
 gfx_constant_struct!(LightingProperties {
-    output_size_in_pixels: [f32; 2] = "u_OutputSizeInPixels",
+    eye_position_in_pixels: [f32; 2] = "u_EyePositionInPixels",
 });
 
 gfx_pipeline!(lighting_pipe {
     quad_corners: gfx::VertexBuffer<QuadCorners> = (),
     properties: gfx::ConstantBuffer<LightingProperties> = "Properties",
+    properties_static: gfx::ConstantBuffer<LightingPropertiesStatic> = "PropertiesStatic",
     in_colour: gfx::TextureSampler<[f32; 4]> = "t_Colour",
     in_visibility: gfx::TextureSampler<[f32; 4]> = "t_Visibility",
     out_colour: gfx::BlendTarget<ColourFormat> =
@@ -106,15 +85,21 @@ impl<R: gfx::Resources> LightingRenderer<R> {
         let data = lighting_pipe::Data {
             quad_corners: quad_corners_buf,
             properties: factory.create_constant_buffer(1),
+            properties_static: factory.create_constant_buffer(1),
             in_colour: (colour_srv, sampler.clone()),
             in_visibility: (visibility_srv.clone(), sampler.clone()),
             out_colour: rtv,
         };
         let bundle = gfx::pso::bundle::Bundle::new(slice, pso, data);
         let (window_width, window_height, _, _) = bundle.data.out_colour.get_dimensions();
-        let properties = LightingProperties {
-            output_size_in_pixels: [window_width as f32, window_height as f32],
+        let properties_static = LightingPropertiesStatic {
+            window_size_in_pixels: [window_width as f32, window_height as f32],
         };
+        let properties = LightingProperties {
+            eye_position_in_pixels: [0., 0.],
+        };
+        encoder
+            .update_constant_buffer(&bundle.data.properties_static, &properties_static);
         encoder.update_constant_buffer(&bundle.data.properties, &properties);
         Self {
             bundle,
@@ -122,11 +107,27 @@ impl<R: gfx::Resources> LightingRenderer<R> {
         }
     }
 
-    fn encode<C>(&self, encoder: &mut gfx::Encoder<R, C>)
+    fn update<C>(&self, eye_position: Vector2<f32>, encoder: &mut gfx::Encoder<R, C>)
+    where
+        C: gfx::CommandBuffer<R>,
+    {
+        let properties = LightingProperties {
+            eye_position_in_pixels: eye_position.into(),
+        };
+        encoder.update_constant_buffer(&self.bundle.data.properties, &properties);
+    }
+
+    fn generate_mipmap<C>(&self, encoder: &mut gfx::Encoder<R, C>)
     where
         C: gfx::CommandBuffer<R>,
     {
         encoder.generate_mipmap(&self.visibility_srv);
+    }
+
+    fn encode<C>(&self, encoder: &mut gfx::Encoder<R, C>)
+    where
+        C: gfx::CommandBuffer<R>,
+    {
         self.bundle.encode(encoder);
     }
 }
@@ -143,7 +144,6 @@ gfx_pipeline!(map_pipe {
         ("TargetVisibility", gfx::state::ColorMask::all(), gfx::preset::blend::ALPHA),
     out_colour: gfx::BlendTarget<ColourFormat> =
         ("TargetColour", gfx::state::ColorMask::all(), gfx::preset::blend::ALPHA),
-    out_depth: gfx::DepthTarget<DepthFormat> = gfx::preset::depth::LESS_EQUAL_WRITE,
 });
 
 struct MapRenderer<R: gfx::Resources> {
@@ -154,7 +154,6 @@ impl<R: gfx::Resources> MapRenderer<R> {
     pub fn new<F, C>(
         colour_rtv: gfx::handle::RenderTargetView<R, ColourFormat>,
         visibility_rtv: gfx::handle::RenderTargetView<R, ColourFormat>,
-        dsv: gfx::handle::DepthStencilView<R, DepthFormat>,
         factory: &mut F,
         encoder: &mut gfx::Encoder<R, C>,
     ) -> Self
@@ -176,10 +175,19 @@ impl<R: gfx::Resources> MapRenderer<R> {
         let (_, texture_srv) = factory
             .create_texture_immutable_u8::<ColourFormat>(tex_kind, tex_mipmap, &[&image])
             .expect("failed to create texture");
-        let sampler = factory.create_sampler(gfx::texture::SamplerInfo::new(
-            gfx::texture::FilterMethod::Mipmap,
-            gfx::texture::WrapMode::Tile,
-        ));
+        let sampler_info = gfx::texture::SamplerInfo {
+            filter: gfx::texture::FilterMethod::Trilinear,
+            wrap_mode: (
+                gfx::texture::WrapMode::Tile,
+                gfx::texture::WrapMode::Tile,
+                gfx::texture::WrapMode::Tile,
+            ),
+            lod_bias: gfx::texture::Lod::from(0.),
+            lod_range: (gfx::texture::Lod::from(0.), gfx::texture::Lod::from(100.)),
+            comparison: Some(gfx::state::Comparison::Equal),
+            border: gfx::texture::PackedColor(0),
+        };
+        let sampler = factory.create_sampler(sampler_info);
 
         let pso = factory
             .create_pipeline_simple(
@@ -205,7 +213,6 @@ impl<R: gfx::Resources> MapRenderer<R> {
             image: (texture_srv, sampler),
             out_visibility: visibility_rtv,
             out_colour: colour_rtv,
-            out_depth: dsv,
         };
         let bundle = gfx::pso::bundle::Bundle::new(slice, pso, data);
         let (window_width, window_height, _, _) = bundle.data.out_colour.get_dimensions();
@@ -250,7 +257,6 @@ gfx_pipeline!(quad_pipe {
         ("TargetVisibility", gfx::state::ColorMask::all(), gfx::preset::blend::ALPHA),
     out_colour: gfx::BlendTarget<ColourFormat> =
         ("TargetColour", gfx::state::ColorMask::all(), gfx::preset::blend::ALPHA),
-    out_depth: gfx::DepthTarget<DepthFormat> = gfx::preset::depth::LESS_EQUAL_WRITE,
 });
 
 struct QuadRenderer<R: gfx::Resources> {
@@ -263,7 +269,6 @@ impl<R: gfx::Resources> QuadRenderer<R> {
     pub fn new<F, C>(
         colour_rtv: gfx::handle::RenderTargetView<R, ColourFormat>,
         visibility_rtv: gfx::handle::RenderTargetView<R, ColourFormat>,
-        dsv: gfx::handle::DepthStencilView<R, DepthFormat>,
         factory: &mut F,
         encoder: &mut gfx::Encoder<R, C>,
     ) -> Self
@@ -315,7 +320,6 @@ impl<R: gfx::Resources> QuadRenderer<R> {
             sprite_sheet: (texture_srv, sampler),
             out_colour: colour_rtv,
             out_visibility: visibility_rtv,
-            out_depth: dsv,
         };
         let bundle = gfx::pso::bundle::Bundle::new(slice, pso, data);
         let (window_width, window_height, _, _) = bundle.data.out_colour.get_dimensions();
@@ -504,30 +508,60 @@ fn main() {
     let mut encoder: gfx::Encoder<Resources, gfx_device_gl::CommandBuffer> =
         factory.create_command_buffer().into();
 
-    let colour_target =
-        RenderTarget::new(vec2(width as u16, height as u16), &mut factory);
-    let visibility_target =
-        RenderTarget::new(vec2(width as u16, height as u16), &mut factory);
+    let (_, colour_srv, colour_rtv) = factory
+        .create_render_target(width as u16, height as u16)
+        .expect("Failed to create render target");
+
+    let tex_kind =
+        gfx::texture::Kind::D2(width as u16, height as u16, gfx::texture::AaMode::Single);
+    let tex_mipmap = gfx::texture::Mipmap::Allocated;
+
+    type R = Resources;
+    type T = (gfx::format::R8_G8_B8_A8, gfx::format::Srgb);
+    type Surface = <T as gfx::format::Formatted>::Surface;
+    type View = <T as gfx::format::Formatted>::View;
+
+    let cty = <<T as gfx::format::Formatted>::Channel as gfx::format::ChannelTyped>::get_channel_type();
+
+    let visibility_tex: gfx::handle::Texture<Resources, Surface> = factory
+        .create_texture::<Surface>(
+            tex_kind,
+            tex_kind.get_num_levels(),
+            gfx::memory::Bind::SHADER_RESOURCE | gfx::memory::Bind::RENDER_TARGET,
+            gfx::memory::Usage::Data,
+            Some(cty),
+        )
+        .expect("Failed to create texture");
+
+    let visibility_srv: gfx::handle::ShaderResourceView<Resources, View> = factory
+        .view_texture_as_shader_resource::<T>(
+            &visibility_tex,
+            (0, tex_kind.get_num_levels()),
+            gfx::format::Swizzle::new(),
+        )
+        .unwrap();
+
+    let visibility_rtv: gfx::handle::RenderTargetView<R, T> = factory
+        .view_texture_as_render_target::<T>(&visibility_tex, 0, None)
+        .unwrap();
 
     let mut quad_renderer = QuadRenderer::new(
-        colour_target.rtv.clone(),
-        visibility_target.rtv.clone(),
-        colour_target.dsv.clone(),
+        colour_rtv.clone(),
+        visibility_rtv.clone(),
         &mut factory,
         &mut encoder,
     );
 
     let mut map_renderer = MapRenderer::new(
-        colour_target.rtv.clone(),
-        visibility_target.rtv.clone(),
-        colour_target.dsv.clone(),
+        colour_rtv.clone(),
+        visibility_rtv.clone(),
         &mut factory,
         &mut encoder,
     );
 
     let mut lighting_renderer = LightingRenderer::new(
-        colour_target.srv.clone(),
-        visibility_target.srv.clone(),
+        colour_srv.clone(),
+        visibility_srv,
         rtv.clone(),
         &mut factory,
         &mut encoder,
@@ -548,6 +582,10 @@ fn main() {
         quad_renderer.update(game_state.to_render(), &mut factory);
         map_renderer.encode(&mut encoder);
         quad_renderer.encode(&mut encoder);
+
+        lighting_renderer.generate_mipmap(&mut encoder);
+
+        lighting_renderer.update(game_state.eye_position(), &mut encoder);
         lighting_renderer.encode(&mut encoder);
 
         encoder.flush(&mut device);
@@ -754,5 +792,11 @@ impl GameState {
                 next_velocity
             };
         }
+    }
+    pub fn eye_position(&self) -> Vector2<f32> {
+        self.physics
+            .get(&self.player_id)
+            .expect("no player physics")
+            .centre_position
     }
 }
