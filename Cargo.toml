@@ -1,0 +1,14 @@
+[package]
+name = "rasteroids"
+version = "0.1.0"
+authors = ["Stephen Sherratt <sfsherratt@gmail.com>"]
+
+[dependencies]
+cgmath = "0.16"
+fnv = "1.0"
+image = "0.19"
+gilrs = "0.6"
+gfx = "0.17"
+gfx_device_gl = "0.15"
+gfx_window_glutin = "0.23"
+glutin = "0.15"
