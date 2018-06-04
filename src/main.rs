@@ -12,7 +12,7 @@ use gfx::Device;
 use gfx::Factory;
 use glutin::GlContext;
 
-use cgmath::{InnerSpace, Vector2, vec2};
+use cgmath::{vec2, InnerSpace, Vector2};
 use fnv::FnvHashMap;
 
 type ColourFormat = gfx::format::Srgba8;
@@ -183,7 +183,10 @@ impl<R: gfx::Resources> MapRenderer<R> {
                 gfx::texture::WrapMode::Tile,
             ),
             lod_bias: gfx::texture::Lod::from(0.),
-            lod_range: (gfx::texture::Lod::from(0.), gfx::texture::Lod::from(100.)),
+            lod_range: (
+                gfx::texture::Lod::from(0.),
+                gfx::texture::Lod::from(100.),
+            ),
             comparison: Some(gfx::state::Comparison::Equal),
             border: gfx::texture::PackedColor(0),
         };
@@ -357,8 +360,9 @@ impl<R: gfx::Resources> QuadRenderer<R> {
                 writer.dimensions_in_pixels =
                     to_render.physics.bounding_dimensions.into();
                 writer.facing_vector = to_render.physics.facing.into();
-                writer.sprite_position_of_top_left_in_pixels =
-                    to_render.graphics.sprite_position_of_top_left_in_pixels;
+                writer.sprite_position_of_top_left_in_pixels = to_render
+                    .graphics
+                    .sprite_position_of_top_left_in_pixels;
                 writer.sprite_dimensions_in_pixels =
                     to_render.graphics.sprite_dimensions_in_pixels;
                 count + 1
@@ -512,8 +516,11 @@ fn main() {
         .create_render_target(width as u16, height as u16)
         .expect("Failed to create render target");
 
-    let tex_kind =
-        gfx::texture::Kind::D2(width as u16, height as u16, gfx::texture::AaMode::Single);
+    let tex_kind = gfx::texture::Kind::D2(
+        width as u16,
+        height as u16,
+        gfx::texture::AaMode::Single,
+    );
 
     type R = Resources;
     type T = (gfx::format::R8_G8_B8_A8, gfx::format::Srgb);
@@ -725,7 +732,7 @@ impl GameState {
         game_state.physics.insert(
             player_id,
             Physics {
-                centre_position: vec2(200., 100.),
+                centre_position: vec2(700., 900.),
                 bounding_dimensions: vec2(32., 64.),
                 velocity: vec2(0., 0.),
                 facing: vec2(1., -1.).normalize(),
@@ -752,7 +759,9 @@ impl GameState {
         {
             let _add_asteroid = |centre_position| {
                 let id = game_state.entity_id_allocator.allocate();
-                game_state.graphics.insert(id, asteroid_graphics.clone());
+                game_state
+                    .graphics
+                    .insert(id, asteroid_graphics.clone());
                 game_state
                     .physics
                     .insert(id, asteroid_physics(centre_position));
@@ -762,9 +771,10 @@ impl GameState {
     }
     pub fn to_render(&self) -> impl Iterator<Item = ToRender> {
         self.physics.iter().filter_map(move |(id, physics)| {
-            self.graphics
-                .get(id)
-                .map(|graphics| ToRender { physics, graphics })
+            self.graphics.get(id).map(|graphics| ToRender {
+                physics,
+                graphics,
+            })
         })
     }
     pub fn update(&mut self, input_model: &InputModel) {
