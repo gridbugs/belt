@@ -141,7 +141,12 @@ bool is_pixel_visible(
 }
 
 void main() {
-    if (!is_pixel_visible(v_PixelCoord, u_EyePositionInPixels, t_Visibility, u_WindowSizeInPixels, INITIAL_LOD)) {
+    if (!is_pixel_visible(
+                v_PixelCoord,
+                u_EyePositionInPixels,
+                t_Visibility,
+                u_WindowSizeInPixels,
+                INITIAL_LOD)) {
         Target0 = vec4(0,0,0,1);
     } else {
         vec4 colour = texture(t_Colour, v_TexCoord);

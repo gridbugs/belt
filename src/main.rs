@@ -19,6 +19,10 @@ type ColourFormat = gfx::format::Srgba8;
 type DepthFormat = gfx::format::DepthStencil;
 type Resources = gfx_device_gl::Resources;
 
+type Format = (gfx::format::R8_G8_B8_A8, gfx::format::Srgb);
+type Surface = <Format as gfx::format::Formatted>::Surface;
+type View = <Format as gfx::format::Formatted>::View;
+
 const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
 const QUAD_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
 
@@ -36,21 +40,21 @@ gfx_pipeline!(lighting_pipe {
     quad_corners: gfx::VertexBuffer<QuadCorners> = (),
     properties: gfx::ConstantBuffer<LightingProperties> = "Properties",
     properties_static: gfx::ConstantBuffer<LightingPropertiesStatic> = "PropertiesStatic",
-    in_colour: gfx::TextureSampler<[f32; 4]> = "t_Colour",
-    in_visibility: gfx::TextureSampler<[f32; 4]> = "t_Visibility",
+    in_colour: gfx::TextureSampler<View> = "t_Colour",
+    in_visibility: gfx::TextureSampler<View> = "t_Visibility",
     out_colour: gfx::BlendTarget<ColourFormat> =
         ("Target0", gfx::state::ColorMask::all(), gfx::preset::blend::ALPHA),
 });
 
 struct LightingRenderer<R: gfx::Resources> {
     bundle: gfx::Bundle<R, lighting_pipe::Data<R>>,
-    visibility_srv: gfx::handle::ShaderResourceView<R, [f32; 4]>,
+    visibility_srv: gfx::handle::ShaderResourceView<R, View>,
 }
 
 impl<R: gfx::Resources> LightingRenderer<R> {
     pub fn new<F, C>(
-        colour_srv: gfx::handle::ShaderResourceView<R, [f32; 4]>,
-        visibility_srv: gfx::handle::ShaderResourceView<R, [f32; 4]>,
+        colour_srv: gfx::handle::ShaderResourceView<R, View>,
+        visibility_srv: gfx::handle::ShaderResourceView<R, View>,
         rtv: gfx::handle::RenderTargetView<R, ColourFormat>,
         factory: &mut F,
         encoder: &mut gfx::Encoder<R, C>,
@@ -139,7 +143,7 @@ gfx_constant_struct!(MapProperties {
 gfx_pipeline!(map_pipe {
     quad_corners: gfx::VertexBuffer<QuadCorners> = (),
     properties: gfx::ConstantBuffer<MapProperties> = "Properties",
-    image: gfx::TextureSampler<[f32; 4]> = "t_Image",
+    image: gfx::TextureSampler<View> = "t_Image",
     out_visibility: gfx::BlendTarget<ColourFormat> =
         ("TargetVisibility", gfx::state::ColorMask::all(), gfx::preset::blend::ALPHA),
     out_colour: gfx::BlendTarget<ColourFormat> =
@@ -255,7 +259,7 @@ gfx_pipeline!(quad_pipe {
     quad_corners: gfx::VertexBuffer<QuadCorners> = (),
     quad_instances: gfx::InstanceBuffer<QuadInstance> = (),
     properties: gfx::ConstantBuffer<QuadProperties> = "Properties",
-    sprite_sheet: gfx::TextureSampler<[f32; 4]> = "t_SpriteSheet",
+    sprite_sheet: gfx::TextureSampler<View> = "t_SpriteSheet",
     out_visibility: gfx::BlendTarget<ColourFormat> =
         ("TargetVisibility", gfx::state::ColorMask::all(), gfx::preset::blend::ALPHA),
     out_colour: gfx::BlendTarget<ColourFormat> =
@@ -497,7 +501,7 @@ fn update_input_model(
 }
 
 fn main() {
-    let (width, height) = (1024, 1024);
+    let (width, height) = (1028, 1028);
     let builder = glutin::WindowBuilder::new()
         .with_dimensions(width, height)
         .with_min_dimensions(width, height)
@@ -522,12 +526,7 @@ fn main() {
         gfx::texture::AaMode::Single,
     );
 
-    type R = Resources;
-    type T = (gfx::format::R8_G8_B8_A8, gfx::format::Srgb);
-    type Surface = <T as gfx::format::Formatted>::Surface;
-    type View = <T as gfx::format::Formatted>::View;
-
-    let cty = <<T as gfx::format::Formatted>::Channel as gfx::format::ChannelTyped>::get_channel_type();
+    let cty = <<Format as gfx::format::Formatted>::Channel as gfx::format::ChannelTyped>::get_channel_type();
 
     let visibility_tex: gfx::handle::Texture<Resources, Surface> = factory
         .create_texture::<Surface>(
@@ -540,15 +539,15 @@ fn main() {
         .expect("Failed to create texture");
 
     let visibility_srv: gfx::handle::ShaderResourceView<Resources, View> = factory
-        .view_texture_as_shader_resource::<T>(
+        .view_texture_as_shader_resource::<Format>(
             &visibility_tex,
             (0, tex_kind.get_num_levels()),
             gfx::format::Swizzle::new(),
         )
         .unwrap();
 
-    let visibility_rtv: gfx::handle::RenderTargetView<R, T> = factory
-        .view_texture_as_render_target::<T>(&visibility_tex, 0, None)
+    let visibility_rtv: gfx::handle::RenderTargetView<Resources, Format> = factory
+        .view_texture_as_render_target::<Format>(&visibility_tex, 0, None)
         .unwrap();
 
     let mut quad_renderer = QuadRenderer::new(
@@ -732,7 +731,7 @@ impl GameState {
         game_state.physics.insert(
             player_id,
             Physics {
-                centre_position: vec2(700., 900.),
+                centre_position: vec2(266., 550.),
                 bounding_dimensions: vec2(32., 64.),
                 velocity: vec2(0., 0.),
                 facing: vec2(1., -1.).normalize(),
