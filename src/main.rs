@@ -12,8 +12,9 @@ use gfx::Device;
 use gfx::Factory;
 use glutin::GlContext;
 
-use cgmath::{vec2, InnerSpace, Vector2};
+use cgmath::{InnerSpace, Vector2, vec2};
 use fnv::FnvHashMap;
+use image::GenericImage;
 
 type ColourFormat = gfx::format::Srgba8;
 type DepthFormat = gfx::format::DepthStencil;
@@ -27,6 +28,103 @@ const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
 const QUAD_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
 
 const MAX_NUM_QUADS: usize = 1024;
+
+gfx_constant_struct!(OutputProperties {
+    player_position_in_pixels: [f32; 2] = "u_PlayerPositionInPixels",
+    zoom: f32 = "u_Zoom",
+});
+
+gfx_constant_struct!(OutputPropertiesStatic {
+    window_size_in_pixels: [f32; 2] = "u_WindowSizeInPixels",
+    input_size_in_pixels: [f32; 2] = "u_InputSizeInPixels",
+});
+
+gfx_pipeline!(output_pipe {
+    quad_corners: gfx::VertexBuffer<QuadCorners> = (),
+    properties: gfx::ConstantBuffer<OutputProperties> = "Properties",
+    properties_static: gfx::ConstantBuffer<OutputPropertiesStatic> = "PropertiesStatic",
+    in_colour: gfx::TextureSampler<View> = "t_Colour",
+    out_colour: gfx::BlendTarget<ColourFormat> =
+        ("Target0", gfx::state::ColorMask::all(), gfx::preset::blend::ALPHA),
+});
+struct OutputRenderer<R: gfx::Resources> {
+    bundle: gfx::Bundle<R, output_pipe::Data<R>>,
+}
+
+impl<R: gfx::Resources> OutputRenderer<R> {
+    pub fn new<F, C>(
+        colour_srv: gfx::handle::ShaderResourceView<R, View>,
+        srv_size: Vector2<f32>,
+        rtv: gfx::handle::RenderTargetView<R, ColourFormat>,
+        factory: &mut F,
+        encoder: &mut gfx::Encoder<R, C>,
+    ) -> Self
+    where
+        F: gfx::Factory<R> + gfx::traits::FactoryExt<R>,
+        C: gfx::CommandBuffer<R>,
+    {
+        let sampler = factory.create_sampler(gfx::texture::SamplerInfo::new(
+            gfx::texture::FilterMethod::Scale,
+            gfx::texture::WrapMode::Border,
+        ));
+
+        let pso = factory
+            .create_pipeline_simple(
+                include_bytes!("shaders/output/shader.150.vert"),
+                include_bytes!("shaders/output/shader.150.frag"),
+                output_pipe::new(),
+            )
+            .expect("Failed to create pipeline");
+
+        let quad_corners_data = QUAD_COORDS
+            .iter()
+            .map(|v| QuadCorners {
+                corner_zero_to_one: *v,
+            })
+            .collect::<Vec<_>>();
+
+        let (quad_corners_buf, slice) = factory
+            .create_vertex_buffer_with_slice(&quad_corners_data, &QUAD_INDICES[..]);
+
+        let data = output_pipe::Data {
+            quad_corners: quad_corners_buf,
+            properties: factory.create_constant_buffer(1),
+            properties_static: factory.create_constant_buffer(1),
+            in_colour: (colour_srv, sampler.clone()),
+            out_colour: rtv,
+        };
+        let bundle = gfx::pso::bundle::Bundle::new(slice, pso, data);
+        let (window_width, window_height, _, _) = bundle.data.out_colour.get_dimensions();
+        let properties_static = OutputPropertiesStatic {
+            window_size_in_pixels: [window_width as f32, window_height as f32],
+            input_size_in_pixels: srv_size.into(),
+        };
+        encoder
+            .update_constant_buffer(&bundle.data.properties_static, &properties_static);
+        Self { bundle }
+    }
+
+    fn update<C>(
+        &self,
+        player_info: PlayerInfo,
+        zoom: f32,
+        encoder: &mut gfx::Encoder<R, C>,
+    ) where
+        C: gfx::CommandBuffer<R>,
+    {
+        let properties = OutputProperties {
+            player_position_in_pixels: player_info.physics.centre_position.into(),
+            zoom,
+        };
+        encoder.update_constant_buffer(&self.bundle.data.properties, &properties);
+    }
+    fn encode<C>(&self, encoder: &mut gfx::Encoder<R, C>)
+    where
+        C: gfx::CommandBuffer<R>,
+    {
+        self.bundle.encode(encoder);
+    }
+}
 
 gfx_constant_struct!(LightingPropertiesStatic {
     window_size_in_pixels: [f32; 2] = "u_WindowSizeInPixels",
@@ -187,10 +285,7 @@ impl<R: gfx::Resources> MapRenderer<R> {
                 gfx::texture::WrapMode::Tile,
             ),
             lod_bias: gfx::texture::Lod::from(0.),
-            lod_range: (
-                gfx::texture::Lod::from(0.),
-                gfx::texture::Lod::from(100.),
-            ),
+            lod_range: (gfx::texture::Lod::from(0.), gfx::texture::Lod::from(100.)),
             comparison: Some(gfx::state::Comparison::Equal),
             border: gfx::texture::PackedColor(0),
         };
@@ -248,11 +343,13 @@ gfx_vertex_struct!(QuadInstance {
     facing_vector: [f32; 2] = "i_FacingVector",
     sprite_position_of_top_left_in_pixels: [f32; 2] = "i_SpritePositionOfTopLeftInPixels",
     sprite_dimensions_in_pixels: [f32; 2] = "i_SpriteDimensionsInPixels",
+    is_player: f32 = "i_IsPlayer",
 });
 
 gfx_constant_struct!(QuadProperties {
     window_size_in_pixels: [f32; 2] = "u_WindowSizeInPixels",
     sprite_sheet_size_in_pixels: [f32; 2] = "u_SpriteSheetSizeInPixels",
+    sprite_scale: f32 = "u_SpriteScale",
 });
 
 gfx_pipeline!(quad_pipe {
@@ -283,8 +380,18 @@ impl<R: gfx::Resources> QuadRenderer<R> {
         F: gfx::Factory<R> + gfx::traits::FactoryExt<R>,
         C: gfx::CommandBuffer<R>,
     {
-        let image = image::load_from_memory(include_bytes!("images/sprites.png"))
-            .expect("Failed to decode image")
+        let sprite_sheet_max = (14, 26);
+        let sprite_scale = 1;
+
+        let mut image = image::load_from_memory(include_bytes!("images/sprites.png"))
+            .expect("Failed to decode image");
+        let image = image.crop(0, 0, sprite_sheet_max.0, sprite_sheet_max.1);
+        let image = image
+            .resize(
+                sprite_scale * image.width(),
+                sprite_scale * image.height(),
+                image::FilterType::Nearest,
+            )
             .to_rgba();
         let (image_width, image_height) = image.dimensions();
         let tex_kind = gfx::texture::Kind::D2(
@@ -296,10 +403,14 @@ impl<R: gfx::Resources> QuadRenderer<R> {
         let (_, texture_srv) = factory
             .create_texture_immutable_u8::<ColourFormat>(tex_kind, tex_mipmap, &[&image])
             .expect("failed to create texture");
-        let sampler = factory.create_sampler(gfx::texture::SamplerInfo::new(
-            gfx::texture::FilterMethod::Mipmap,
-            gfx::texture::WrapMode::Tile,
-        ));
+        let mut info = gfx::texture::SamplerInfo::new(
+            gfx::texture::FilterMethod::Scale,
+            gfx::texture::WrapMode::Border,
+        );
+        info.border = gfx::texture::PackedColor(0);
+        let sampler = factory.create_sampler(info);
+
+        encoder.generate_mipmap(&texture_srv);
 
         let pso = factory
             .create_pipeline_simple(
@@ -333,6 +444,7 @@ impl<R: gfx::Resources> QuadRenderer<R> {
         let properties = QuadProperties {
             window_size_in_pixels: [window_width as f32, window_height as f32],
             sprite_sheet_size_in_pixels: [image_width as f32, image_height as f32],
+            sprite_scale: sprite_scale as f32,
         };
 
         let quad_instances_upload: gfx::handle::Buffer<R, QuadInstance> = factory
@@ -364,11 +476,11 @@ impl<R: gfx::Resources> QuadRenderer<R> {
                 writer.dimensions_in_pixels =
                     to_render.physics.bounding_dimensions.into();
                 writer.facing_vector = to_render.physics.facing.into();
-                writer.sprite_position_of_top_left_in_pixels = to_render
-                    .graphics
-                    .sprite_position_of_top_left_in_pixels;
+                writer.sprite_position_of_top_left_in_pixels =
+                    to_render.graphics.sprite_position_of_top_left_in_pixels;
                 writer.sprite_dimensions_in_pixels =
                     to_render.graphics.sprite_dimensions_in_pixels;
+                writer.is_player = (to_render.is_player as u8) as f32;
                 count + 1
             });
         self.bundle.slice.instances = Some((self.num_quads as u32, 0));
@@ -501,7 +613,7 @@ fn update_input_model(
 }
 
 fn main() {
-    let (width, height) = (1028, 1028);
+    let (width, height) = (1024, 1024);
     let builder = glutin::WindowBuilder::new()
         .with_dimensions(width, height)
         .with_min_dimensions(width, height)
@@ -516,15 +628,16 @@ fn main() {
     let mut encoder: gfx::Encoder<Resources, gfx_device_gl::CommandBuffer> =
         factory.create_command_buffer().into();
 
+    let (_, output_srv, output_rtv) = factory
+        .create_render_target(width as u16, height as u16)
+        .expect("Failed to create render target");
+
     let (_, colour_srv, colour_rtv) = factory
         .create_render_target(width as u16, height as u16)
         .expect("Failed to create render target");
 
-    let tex_kind = gfx::texture::Kind::D2(
-        width as u16,
-        height as u16,
-        gfx::texture::AaMode::Single,
-    );
+    let tex_kind =
+        gfx::texture::Kind::D2(width as u16, height as u16, gfx::texture::AaMode::Single);
 
     let cty = <<Format as gfx::format::Formatted>::Channel as gfx::format::ChannelTyped>::get_channel_type();
 
@@ -565,8 +678,18 @@ fn main() {
     );
 
     let lighting_renderer = LightingRenderer::new(
-        colour_srv.clone(),
+        colour_srv,
         visibility_srv,
+        output_rtv,
+        &mut factory,
+        &mut encoder,
+    );
+
+    let world_size = vec2(width as f32, height as f32);
+
+    let output_renderer = OutputRenderer::new(
+        output_srv,
+        world_size,
         rtv.clone(),
         &mut factory,
         &mut encoder,
@@ -590,8 +713,12 @@ fn main() {
 
         lighting_renderer.generate_mipmap(&mut encoder);
 
-        lighting_renderer.update(game_state.eye_position(), &mut encoder);
+        let player_info = game_state.player_info();
+        let eye_position = player_info.physics.centre_position;
+        lighting_renderer.update(eye_position, &mut encoder);
         lighting_renderer.encode(&mut encoder);
+        output_renderer.update(player_info, 4., &mut encoder);
+        output_renderer.encode(&mut encoder);
 
         encoder.flush(&mut device);
         window.swap_buffers().unwrap();
@@ -716,6 +843,12 @@ pub struct GameState {
 pub struct ToRender<'a> {
     graphics: &'a Graphics,
     physics: &'a Physics,
+    is_player: bool,
+}
+
+pub struct PlayerInfo<'a> {
+    graphics: &'a Graphics,
+    physics: &'a Physics,
 }
 
 impl GameState {
@@ -758,9 +891,7 @@ impl GameState {
         {
             let _add_asteroid = |centre_position| {
                 let id = game_state.entity_id_allocator.allocate();
-                game_state
-                    .graphics
-                    .insert(id, asteroid_graphics.clone());
+                game_state.graphics.insert(id, asteroid_graphics.clone());
                 game_state
                     .physics
                     .insert(id, asteroid_physics(centre_position));
@@ -773,6 +904,7 @@ impl GameState {
             self.graphics.get(id).map(|graphics| ToRender {
                 physics,
                 graphics,
+                is_player: *id == self.player_id,
             })
         })
     }
@@ -791,10 +923,14 @@ impl GameState {
             physics.velocity = next_velocity;
         }
     }
-    pub fn eye_position(&self) -> Vector2<f32> {
-        self.physics
-            .get(&self.player_id)
-            .expect("no player physics")
-            .centre_position
+    pub fn player_info(&self) -> PlayerInfo {
+        PlayerInfo {
+            physics: self.physics
+                .get(&self.player_id)
+                .expect("no player physics"),
+            graphics: self.graphics
+                .get(&self.player_id)
+                .expect("no player graphics"),
+        }
     }
 }

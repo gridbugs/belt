@@ -6,17 +6,21 @@ in vec2 i_DimensionsInPixels;
 in vec2 i_FacingVector;
 in vec2 i_SpritePositionOfTopLeftInPixels;
 in vec2 i_SpriteDimensionsInPixels;
+in float i_IsPlayer;
 
 uniform Properties {
     vec2 u_WindowSizeInPixels;
     vec2 u_SpriteSheetSizeInPixels;
+    float u_SpriteScale;
 };
 
 out vec2 v_SpriteSheetSampleCoord;
+flat out uint v_IsPlayer;
 
 void main() {
 
-    vec2 right_facing_vector = vec2(-i_FacingVector.y, i_FacingVector.x);
+    vec2 facing_vector = i_FacingVector;
+    vec2 right_facing_vector = vec2(-facing_vector.y, facing_vector.x);
 
     vec2 pixel_offset_from_centre = i_DimensionsInPixels / 2 - a_CornerZeroToOne * i_DimensionsInPixels;
     vec2 rotated_pixel_offset_from_centre =
@@ -29,8 +33,10 @@ void main() {
         pixel_coord.y / u_WindowSizeInPixels.y * 2 - 1);
 
     v_SpriteSheetSampleCoord =
-        (i_SpritePositionOfTopLeftInPixels +
+        u_SpriteScale * (i_SpritePositionOfTopLeftInPixels +
         i_SpriteDimensionsInPixels * a_CornerZeroToOne) / u_SpriteSheetSizeInPixels;
+
+    v_IsPlayer = uint(i_IsPlayer);
 
     gl_Position = vec4(screen_coord, 0, 1);
 }
